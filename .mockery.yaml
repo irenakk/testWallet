@@ -1,0 +1,16 @@
+with-expecter: true
+packages:
+  github.com/simple-wallet/internal/repository:
+    interfaces:
+      WalletRepository:
+        config:
+          dir: internal/mocks
+          outpkg: mocks
+          mockname: MockWalletRepository
+  github.com/simple-wallet/internal/service:
+    interfaces:
+      WalletService:
+        config:
+          dir: internal/mocks
+          outpkg: mocks
+          mockname: MockWalletService
