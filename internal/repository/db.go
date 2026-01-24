@@ -2,14 +2,14 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"embed"
 	"fmt"
 	"time"
 
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5/pgxpool"
-	_ "github.com/jackc/pgx/v5/stdlib"
-	"github.com/pressly/goose/v3"
 	"github.com/simple-wallet/internal/config"
 )
 
@@ -43,19 +43,18 @@ func NewPostgresPool(ctx context.Context, cfg *config.DatabaseConfig) (*DBPool, 
 }
 
 func RunMigrations(cfg *config.DatabaseConfig) error {
-	db, err := sql.Open("pgx", cfg.DSN())
+	source, err := iofs.New(embedMigrations, "migrations")
 	if err != nil {
-		return fmt.Errorf("failed to open database for migrations: %w", err)
-	}
-	defer db.Close()
-
-	goose.SetBaseFS(embedMigrations)
-
-	if err := goose.SetDialect("postgres"); err != nil {
-		return fmt.Errorf("failed to set goose dialect: %w", err)
+		return fmt.Errorf("failed to create migration source: %w", err)
 	}
 
-	if err := goose.Up(db, "migrations"); err != nil {
+	m, err := migrate.NewWithSourceInstance("iofs", source, cfg.DSN())
+	if err != nil {
+		return fmt.Errorf("failed to create migrate instance: %w", err)
+	}
+	defer m.Close()
+
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
