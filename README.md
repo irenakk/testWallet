@@ -1,122 +1,93 @@
-# Simple Wallet API
+# testWallet
 
-REST API для управления кошельками с поддержкой депозитов и снятий средств.
+My solution to a backend test task: a small REST API in Go that stores wallet balances in PostgreSQL and handles deposits and withdrawals. The main point of the task was correct balances under many parallel requests to the same wallet.
 
-## Технологии
+Stack: Go 1.24, gorilla/mux, pgx v5 (pgxpool), PostgreSQL 16, golang-migrate, testify + mockery, Docker Compose.
 
-- Go 1.24
-- PostgreSQL 16
-- Docker & Docker Compose
+## How to run
 
-## Запуск
-
-### С Docker Compose (рекомендуется)
+With Docker Compose (Postgres + the app):
 
 ```bash
-# Собрать и запустить все сервисы
 docker-compose up --build
-
-# Или в фоновом режиме
-docker-compose up -d --build
 ```
 
-## API Endpoints
+The API is on `localhost:8080`. Postgres is published on host port `5433`.
 
-### POST /api/v1/wallet
-Выполнение операции (депозит/снятие)
-```json
-{
-    "walletId": "550e8400-e29b-41d4-a716-446655440000",
-    "operationType": "DEPOSIT",
-    "amount": 1000
-}
-```
+Migrations live in `internal/repository/migrations`, are embedded into the binary and applied on startup, so there is no separate migration step.
 
-**Response (200 OK):**
-```json
-{
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "balance": 1000
-}
-```
-
-### GET /api/v1/wallets/{walletId}
-Получение баланса кошелька
-
-**Response (200 OK):**
-```json
-{
-    "id": "550e8400-e29b-41d4-a716-446655440000",
-    "balance": 1000
-}
-```
-
-## Конкурентность
-
-Приложение оптимизировано для обработки 1000 RPS на один кошелёк:
-
-- `SELECT FOR UPDATE` для блокировки строки на уровне БД
-- Connection pool с настраиваемым количеством соединений
-- Транзакции PostgreSQL
-- `ON CONFLICT`: безопасное создание кошелька при первом пополнении
-
-## Конфигурация
-
-Переменные окружения (config.env):
-
-| Переменная | Описание | По умолчанию |
-|------------|----------|--------------|
-| DATABASE_HOST | Хост БД | postgres |
-| DATABASE_PORT | Порт БД | 5432 |
-| DATABASE_USER | Пользователь БД | wallet_user |
-| DATABASE_PASSWORD | Пароль БД | wallet_password |
-| DATABASE_NAME | Имя БД | wallet_db |
-| DATABASE_SSL_MODE | SSL режим | disable |
-| DATABASE_MAX_CONNS | Макс. соединений | 100 |
-| DATABASE_MIN_CONNS | Мин. соединений | 10 |
-| SERVER_HOST | Хост сервера | 0.0.0.0 |
-| SERVER_PORT | Порт сервера | 8080 |
-
-## Тестирование
+To run the app outside Docker against the Compose database:
 
 ```bash
-# Unit тесты
-go test -v ./...
-
-# Интеграционные тесты (требуется запущенная БД)
-go test -v -tags=integration ./...
-
-# С Makefile
-make test
-make test-integration
+docker-compose up -d postgres
+DATABASE_HOST=localhost DATABASE_PORT=5433 go run ./cmd/server
 ```
 
-## Makefile команды
+Note: `config.env` has `DATABASE_HOST=postgres` (the Compose service name). Variables already set in the environment win over the file, that's why the overrides above work.
+
+## API
+
+| Method | Path | What it does |
+|---|---|---|
+| POST | `/api/v1/wallet` | Deposit to or withdraw from a wallet |
+| GET | `/api/v1/wallets/{walletId}` | Get the balance |
+| GET | `/health` | Returns `{"status":"ok"}` |
+
+Example:
 
 ```bash
-make build          # Собрать бинарник
-make run            # Запустить локально
-make test           # Запустить unit тесты
-make test-integration # Запустить интеграционные тесты
-make docker-up      # Запустить в Docker
-make docker-down    # Остановить Docker
-make docker-clean   # Удалить volumes
-make logs           # Просмотр логов
+curl -X POST localhost:8080/api/v1/wallet \
+  -H 'Content-Type: application/json' \
+  -d '{"walletId":"550e8400-e29b-41d4-a716-446655440000","operationType":"DEPOSIT","amount":1000}'
 ```
 
-## Структура проекта
+```json
+{"id":"550e8400-e29b-41d4-a716-446655440000","balance":1000}
+```
+
+`operationType` is `DEPOSIT` or `WITHDRAW`, `amount` must be a positive integer. A deposit to an unknown wallet ID creates the wallet. Errors are returned as `{"error": "..."}` with 400 for bad input or insufficient funds and 404 when the wallet doesn't exist (GET, or WITHDRAW on a new ID).
+
+## How concurrency is handled
+
+Every operation runs in one transaction. The wallet row is locked with `SELECT ... FOR UPDATE`, so parallel requests to one wallet are applied one after another and no update is lost. If two first deposits for a new wallet arrive at the same time, `INSERT ... ON CONFLICT` adds the second amount to the existing row instead of failing. The `wallets` table also has `CHECK (balance >= 0)` as a last guard.
+
+Pool size comes from `DATABASE_MAX_CONNS` / `DATABASE_MIN_CONNS` (100 and 10 in `config.env`).
+
+## Configuration
+
+Settings are read from `config.env`; environment variables override it.
+
+| Variable | Value in config.env |
+|---|---|
+| `DATABASE_HOST`, `DATABASE_PORT` | `postgres`, `5432` |
+| `DATABASE_USER`, `DATABASE_PASSWORD`, `DATABASE_NAME` | same as in `docker-compose.yml` |
+| `DATABASE_SSL_MODE` | `disable` |
+| `DATABASE_MAX_CONNS`, `DATABASE_MIN_CONNS` | `100`, `10` |
+| `SERVER_HOST`, `SERVER_PORT` | `0.0.0.0`, `8080` |
+| `SERVER_READ_TIMEOUT`, `SERVER_WRITE_TIMEOUT` | `10s`, `10s` |
+
+If `config.env` can't be read, the app uses env vars and built-in defaults (same values, except `DATABASE_HOST` defaults to `localhost`).
+
+## Tests
+
+```bash
+make test    # go test -v ./...
+```
+
+Unit tests cover the HTTP handlers, the service and request validation. They use the mocks in `internal/mocks`, generated by mockery from `.mockery.yaml` (run `mockery` in the repo root to regenerate).
+
+## Makefile
+
+Besides `build`, `run`, `test`, `lint` and `fmt` there are Compose shortcuts (`docker-up`, `docker-down`, `docker-clean` which also drops the volume, `logs`) and targets for the golang-migrate CLI: `install-migrate`, `migrate-up`, `migrate-down`, `migrate-version`, `migrate-create name=...`. The migrate targets need `DATABASE_URL` to be set.
+
+## Project structure
 
 ```
-.
-├── cmd/server/          # Точка входа
-├── internal/
-│   ├── config/          # Конфигурация
-│   ├── handler/         # HTTP обработчики
-│   ├── model/           # Модели данных
-│   ├── repository/      # Слой работы с БД
-│   └── service/         # Бизнес-логика
-├── migrations/          # SQL миграции
-├── config.env           # Переменные окружения
-├── Dockerfile
-└── docker-compose.yml
+cmd/server/            entry point, router, graceful shutdown
+internal/config/       config.env loader
+internal/handler/      HTTP handlers
+internal/service/      validation, calls the repository
+internal/repository/   pgx queries, migrations (embedded)
+internal/model/        types and errors
+internal/mocks/        generated mocks
 ```
